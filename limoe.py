@@ -18,6 +18,8 @@ class LIMoEConfig:
         hidden_dim=1024, 
         num_layers=8, 
         dropout=0.1, 
+        n_heads=8,
+        d_heads=64, #TODO need to check d_heads in the paper
         expert_activation=nn.ReLU(), 
         task_activation=nn.ReLU(), 
         output_activation=nn.Sigmoid()
@@ -37,6 +39,8 @@ class LIMoEConfig:
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.dropout = dropout
+        self.n_heads = n_heads
+        self.d_heads = d_heads
 
         # Activations
         self.expert_activation = expert_activation
@@ -70,6 +74,19 @@ class MoE(nn.Module):
 class SparseSelfAttentionBlock(nn.Module):
     def __init__(self, config:LIMoEConfig) -> None:
         super().__init__()
+        self.hidden_dim = config.hidden_dim
+        self.dropout = config.dropout
+        self.n_heads = config.n_heads
+        self.d_heads = config.d_heads
+        qkv_output_dim = self.n_heads * self.d_heads
+
+        # Q, K, V
+        self.fc_q = nn.Linear(self.hidden_dim, qkv_output_dim)
+        self.fc_k = nn.Linear(self.hidden_dim, qkv_output_dim)
+        self.fc_v = nn.Linear(self.hidden_dim, qkv_output_dim)
+
+        # MoE
+        self.moe = MoE(config)
 
     def forward(self, x):
         return x
@@ -80,6 +97,22 @@ class SparseSelfAttentionBlock(nn.Module):
 class DenseSelfAttentionBlock(nn.Module):
     def __init__(self, config:LIMoEConfig) -> None:
         super().__init__()
+        self.hidden_dim = config.hidden_dim
+        self.dropout = config.dropout
+        self.n_heads = config.n_heads
+        self.d_heads = config.d_heads
+        self.scale = 1 / (self.d_heads ** 0.5)
+        qkv_output_dim = self.n_heads * self.d_heads
+
+        # Q, K, V
+        self.fc_q = nn.Linear(self.hidden_dim, qkv_output_dim)
+        self.fc_k = nn.Linear(self.hidden_dim, qkv_output_dim)
+        self.fc_v = nn.Linear(self.hidden_dim, qkv_output_dim)
+
+        # Output
+        self.fc_o = nn.Linear(qkv_output_dim, self.hidden_dim)
+
+        self.dropout = nn.Dropout(self.dropout)
 
     def forward(self, x):
         return x
