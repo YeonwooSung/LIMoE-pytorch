@@ -4,6 +4,7 @@ import torch.nn as nn
 
 
 #-------------------#
+# Config
 
 class LIMoEConfig:
     def __init__(
@@ -69,32 +70,9 @@ class MoE(nn.Module):
         pass
 
 #-------------------#
-# Sparse Attention block
+# Self-Attention
 
-class SparseSelfAttentionBlock(nn.Module):
-    def __init__(self, config:LIMoEConfig) -> None:
-        super().__init__()
-        self.hidden_dim = config.hidden_dim
-        self.dropout = config.dropout
-        self.n_heads = config.n_heads
-        self.d_heads = config.d_heads
-        qkv_output_dim = self.n_heads * self.d_heads
-
-        # Q, K, V
-        self.fc_q = nn.Linear(self.hidden_dim, qkv_output_dim)
-        self.fc_k = nn.Linear(self.hidden_dim, qkv_output_dim)
-        self.fc_v = nn.Linear(self.hidden_dim, qkv_output_dim)
-
-        # MoE
-        self.moe = MoE(config)
-
-    def forward(self, x):
-        return x
-
-#-------------------#
-# Dense Attention
-
-class DenseSelfAttentionBlock(nn.Module):
+class SelfAttention(nn.Module):
     def __init__(self, config:LIMoEConfig) -> None:
         super().__init__()
         self.hidden_dim = config.hidden_dim
@@ -114,8 +92,60 @@ class DenseSelfAttentionBlock(nn.Module):
 
         self.dropout = nn.Dropout(self.dropout)
 
+    def forward(
+        self,
+        hidden_states,
+        attention_mask,
+        query_states=None,
+        relative_pos=None,
+        rel_embeddings=None,
+        output_attentions=False,
+    ):
+        pass
+
+#-------------------#
+# Sparse Attention block
+
+class SparseSelfAttentionBlock(nn.Module):
+    def __init__(self, config:LIMoEConfig) -> None:
+        super().__init__()
+        self.attention = SelfAttention(config)
+
+        # MoE
+        self.moe = MoE(config)
+
     def forward(self, x):
         return x
+
+#-------------------#
+# Dense Self-Attention Output
+
+class DenseSelfAttentionOutputBlock(nn.Module):
+    def __init__(self, config:LIMoEConfig) -> None:
+        super().__init__()
+    
+    def forward(self, x):
+        pass
+
+#-------------------#
+# Dense Attention
+
+class DenseSelfAttentionBlock(nn.Module):
+    def __init__(self, config:LIMoEConfig) -> None:
+        super().__init__()
+        self.attention = SelfAttention(config)
+        self.outptut = DenseSelfAttentionOutputBlock(config)
+
+    def forward(
+        self,
+        hidden_states,
+        attention_mask,
+        query_states=None,
+        relative_pos=None,
+        rel_embeddings=None,
+        output_attentions=False,
+    ):
+        pass
 
 #-------------------#
 # LIMoE Encoder Layer
@@ -126,8 +156,16 @@ class LIMoEEncoderLayer(nn.Module):
         self.dense_attention = DenseSelfAttentionBlock(config)
         self.sparse_attention = SparseSelfAttentionBlock(config)
 
-    def forward(self, x):
-        return x
+    def forward(
+        self,
+        hidden_states,
+        attention_mask,
+        query_states=None,
+        relative_pos=None,
+        rel_embeddings=None,
+        output_attentions=False,
+    ):
+        pass
 
 #-------------------#
 # LIMoE Encoder
