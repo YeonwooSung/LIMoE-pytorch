@@ -19,6 +19,7 @@ class LIMoEConfig:
         hidden_dim=1024, 
         num_layers=8, 
         dropout=0.1, 
+        pre_lnorm=True,
         n_heads=8,
         d_heads=64, #TODO need to check d_heads in the paper
         expert_activation=nn.ReLU(), 
@@ -40,6 +41,7 @@ class LIMoEConfig:
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.dropout = dropout
+        self.pre_lnorm = pre_lnorm
         self.n_heads = n_heads
         self.d_heads = d_heads
 
@@ -77,6 +79,7 @@ class SelfAttention(nn.Module):
         super().__init__()
         self.hidden_dim = config.hidden_dim
         self.dropout = config.dropout
+        self.pre_lnorm = config.pre_lnorm
         self.n_heads = config.n_heads
         self.d_heads = config.d_heads
         self.scale = 1 / (self.d_heads ** 0.5)
@@ -90,18 +93,59 @@ class SelfAttention(nn.Module):
         # Output
         self.fc_o = nn.Linear(qkv_output_dim, self.hidden_dim)
 
+        # Dropout
         self.dropout = nn.Dropout(self.dropout)
+        # LayerNorm
+        self.ln = nn.LayerNorm(self.hidden_dim)
 
     def forward(
         self,
         hidden_states,
         attention_mask,
         query_states=None,
-        relative_pos=None,
-        rel_embeddings=None,
         output_attentions=False,
     ):
-        pass
+        if query_states is None:
+            query_states = hidden_states
+        residual = hidden_states
+
+        # LayerNorm
+        if self.pre_lnorm:
+            query_states = self.ln(query_states)
+            kv_states = self.ln(hidden_states)
+        else:
+            kv_states = hidden_states
+
+        # Q, K, V
+        q = self.fc_q(query_states)
+        k = self.fc_k(kv_states)
+        v = self.fc_v(kv_states)
+
+        # Split heads
+        q = q.view(q.size(0), q.size(1), self.n_heads, self.d_heads).transpose(1, 2)
+        k = k.view(k.size(0), k.size(1), self.n_heads, self.d_heads).transpose(1, 2)
+        v = v.view(v.size(0), v.size(1), self.n_heads, self.d_heads).transpose(1, 2)
+
+        # Attention
+        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+        attn = attn.masked_fill(attention_mask.unsqueeze(1).unsqueeze(2), -1e9)
+        attn = nn.Softmax(dim=-1)(attn)
+        attn = self.dropout(attn)
+
+        # Apply layer norm to the attention map for the Post-LayerNorm case
+        if not self.pre_lnorm:
+            attn = self.ln(attn)
+
+        # Output
+        attention_output = torch.matmul(attn, v)
+        attention_output = attention_output.transpose(1, 2).contiguous().view(attention_output.size(0), attention_output.size(1), -1)
+        attention_output = self.fc_o(attention_output)
+        attention_output = self.dropout(attention_output)
+        attention_output = attention_output + residual
+
+        # Output
+        outputs = (attention_output, attn) if output_attentions else attention_output
+        return outputs
 
 #-------------------#
 # Sparse Attention block
@@ -141,8 +185,6 @@ class DenseSelfAttentionBlock(nn.Module):
         hidden_states,
         attention_mask,
         query_states=None,
-        relative_pos=None,
-        rel_embeddings=None,
         output_attentions=False,
     ):
         pass
