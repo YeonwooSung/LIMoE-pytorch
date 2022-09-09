@@ -167,6 +167,7 @@ class SparseSelfAttentionBlock(nn.Module):
 class DenseSelfAttentionOutputBlock(nn.Module):
     def __init__(self, config:LIMoEConfig) -> None:
         super().__init__()
+        self.attention = SelfAttention(config)
     
     def forward(self, x):
         pass
@@ -187,7 +188,22 @@ class DenseSelfAttentionBlock(nn.Module):
         query_states=None,
         output_attentions=False,
     ):
-        pass
+        # perform the self-attention
+        attention_output = self.attention(
+            hidden_states,
+            attention_mask,
+            query_states=query_states,
+            output_attentions=output_attentions,
+        )
+
+        # pass the result of the self-attention layer to the dense ff-layer
+        if output_attentions:
+            attention_output, attn_matrix = attention_output
+        attention_output = self.outptut(attention_output)
+
+        # Output
+        outputs = (attention_output, attn_matrix) if output_attentions else attention_output
+        return outputs
 
 #-------------------#
 # LIMoE Encoder Layer
