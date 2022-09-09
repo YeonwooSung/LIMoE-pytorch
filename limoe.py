@@ -22,6 +22,7 @@ class LIMoEConfig:
         pre_lnorm=True,
         n_heads=8,
         d_heads=64, #TODO need to check d_heads in the paper
+        layer_norm_eps=1e-5,
         expert_activation=nn.ReLU(), 
         task_activation=nn.ReLU(), 
         output_activation=nn.Sigmoid()
@@ -45,10 +46,131 @@ class LIMoEConfig:
         self.n_heads = n_heads
         self.d_heads = d_heads
 
+        # LayerNorm
+        self.layer_norm_eps = layer_norm_eps
+
         # Activations
         self.expert_activation = expert_activation
         self.task_activation = task_activation
         self.output_activation = output_activation
+
+
+#-------------------#
+# Helper Classes
+
+class DropoutContext(object):
+    def __init__(self):
+        self.dropout = 0
+        self.mask = None
+        self.scale = 1
+        self.reuse_mask = True
+
+
+def get_mask(input, local_context):
+    if not isinstance(local_context, DropoutContext):
+        dropout = local_context
+        mask = None
+    else:
+        dropout = local_context.dropout
+        dropout *= local_context.scale
+        mask = local_context.mask if local_context.reuse_mask else None
+
+    if dropout > 0 and mask is None:
+        mask = (1 - torch.empty_like(input).bernoulli_(1 - dropout)).to(torch.bool)
+
+    if isinstance(local_context, DropoutContext):
+        if local_context.mask is None:
+            local_context.mask = mask
+
+    return mask, dropout
+
+
+class XDropout(torch.autograd.Function):
+    """Optimized dropout function to save computation and memory by using mask operation instead of multiplication."""
+
+    @staticmethod
+    def forward(ctx, input, local_ctx):
+        mask, dropout = get_mask(input, local_ctx)
+        ctx.scale = 1.0 / (1 - dropout)
+        if dropout > 0:
+            ctx.save_for_backward(mask)
+            return input.masked_fill(mask, 0) * ctx.scale
+        else:
+            return input
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        if ctx.scale > 1:
+            (mask,) = ctx.saved_tensors
+            return grad_output.masked_fill(mask, 0) * ctx.scale, None
+        else:
+            return grad_output, None
+
+
+class StableDropout(nn.Module):
+    """
+    Optimized dropout module for stabilizing the training
+    Args:
+        drop_prob (float): the dropout probabilities
+    """
+
+    def __init__(self, drop_prob):
+        super().__init__()
+        self.drop_prob = drop_prob
+        self.count = 0
+        self.context_stack = None
+
+    def forward(self, x):
+        """
+        Call the module
+        Args:
+            x (`torch.tensor`): The input tensor to apply dropout
+        """
+        if self.training and self.drop_prob > 0:
+            return XDropout.apply(x, self.get_context())
+        return x
+
+    def clear_context(self):
+        self.count = 0
+        self.context_stack = None
+
+    def init_context(self, reuse_mask=True, scale=1):
+        if self.context_stack is None:
+            self.context_stack = []
+        self.count = 0
+        for c in self.context_stack:
+            c.reuse_mask = reuse_mask
+            c.scale = scale
+
+    def get_context(self):
+        if self.context_stack is not None:
+            if self.count >= len(self.context_stack):
+                self.context_stack.append(DropoutContext())
+            ctx = self.context_stack[self.count]
+            ctx.dropout = self.drop_prob
+            self.count += 1
+            return ctx
+        else:
+            return self.drop_prob
+
+
+class LIMoELayerNorm(nn.Module):
+    """LayerNorm module in the TF style (epsilon inside the square root)."""
+    def __init__(self, size, eps=1e-12):
+        super().__init__()
+        self.weight = nn.Parameter(torch.ones(size))
+        self.bias = nn.Parameter(torch.zeros(size))
+        self.variance_epsilon = eps
+
+    def forward(self, hidden_states):
+        input_type = hidden_states.dtype
+        hidden_states = hidden_states.float()
+        mean = hidden_states.mean(-1, keepdim=True)
+        variance = (hidden_states - mean).pow(2).mean(-1, keepdim=True)
+        hidden_states = (hidden_states - mean) / torch.sqrt(variance + self.variance_epsilon)
+        hidden_states = hidden_states.to(input_type)
+        y = self.weight * hidden_states + self.bias
+        return y
 
 
 #-------------------#
@@ -68,7 +190,8 @@ class MoE(nn.Module):
         self.w_gate = nn.Parameter(torch.zeros(self.input_size, self.num_experts), requires_grad=True)
         self.w_noise = nn.Parameter(torch.zeros(self.input_size, self.num_experts), requires_grad=True)
 
-    def forward(self, x):
+    def forward(self, hidden_states, input_tensor):
+        #TODO
         pass
 
 #-------------------#
@@ -158,8 +281,33 @@ class SparseSelfAttentionBlock(nn.Module):
         # MoE
         self.moe = MoE(config)
 
-    def forward(self, x):
-        return x
+    def forward(
+        self,
+        hidden_states,
+        attention_mask,
+        query_states=None,
+        output_attentions=False,
+    ):
+        # perform the self-attention
+        attention_output = self.attention(
+            hidden_states,
+            attention_mask,
+            query_states=query_states,
+            output_attentions=output_attentions,
+        )
+
+        # pass the result of the self-attention layer to the MoE sparse ff-layer
+        if output_attentions:
+            attention_output, attn_matrix = attention_output
+        if query_states is None:
+            query_states = hidden_states
+
+        # MoE
+        moe_output = self.moe(attention_output, query_states)
+
+        # Output
+        outputs = (moe_output, attn_matrix) if output_attentions else moe_output
+        return outputs
 
 #-------------------#
 # Dense Self-Attention Output
@@ -167,10 +315,14 @@ class SparseSelfAttentionBlock(nn.Module):
 class DenseSelfAttentionOutputBlock(nn.Module):
     def __init__(self, config:LIMoEConfig) -> None:
         super().__init__()
-        self.attention = SelfAttention(config)
-    
-    def forward(self, x):
-        pass
+        self.LayerNorm = LIMoELayerNorm(config.hidden_size, config.layer_norm_eps)
+        self.dropout = StableDropout(config.hidden_dropout_prob)
+
+    def forward(self, hidden_states, input_tensor):
+        hidden_states = self.dense(hidden_states)
+        hidden_states = self.dropout(hidden_states)
+        hidden_states = self.LayerNorm(hidden_states + input_tensor)
+        return hidden_states
 
 #-------------------#
 # Dense Attention
@@ -199,7 +351,9 @@ class DenseSelfAttentionBlock(nn.Module):
         # pass the result of the self-attention layer to the dense ff-layer
         if output_attentions:
             attention_output, attn_matrix = attention_output
-        attention_output = self.outptut(attention_output)
+        if query_states is None:
+            query_states = hidden_states
+        attention_output = self.outptut(attention_output, query_states)
 
         # Output
         outputs = (attention_output, attn_matrix) if output_attentions else attention_output
