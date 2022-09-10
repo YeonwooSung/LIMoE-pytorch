@@ -329,5 +329,10 @@ class LIMoE(nn.Module):
         super().__init__()
         self.config = config
 
+        # self.embeddings = LIMoEEmbeddings(config)
+        self.encoder = LIMoEEncoder(config)
+
+        # TODO: add the output layer
+
     def forward(self, x):
         pass
