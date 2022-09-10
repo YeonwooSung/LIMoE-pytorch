@@ -54,3 +54,40 @@ class LIMoEConfig:
         self.expert_activation = expert_activation
         self.task_activation = task_activation
         self.output_activation = output_activation
+    
+    def set_moe_params(
+        self, 
+        num_experts, 
+        num_tasks, 
+        moe_input_size,
+        moe_hidden_size,
+        moe_output_size,
+        top_k=4,
+        noisy_gating=True,
+    ):
+        self.num_experts = num_experts
+        self.num_tasks = num_tasks
+        self.top_k = top_k
+        self.noisy_gating = noisy_gating
+        self.moe_input_size = moe_input_size
+        self.moe_hidden_size = moe_hidden_size
+        self.moe_output_size = moe_output_size
+
+    def set_transformer_params(
+        self, 
+        hidden_dim, 
+        num_layers, 
+        dropout, 
+        pre_lnorm=True,
+        n_heads=8,
+        d_heads=64, #TODO need to check d_heads in the paper
+    ):
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.dropout = dropout
+        self.pre_lnorm = pre_lnorm
+        self.n_heads = n_heads
+        self.d_heads = d_heads
+
+    def set_layer_norm_params(self, layer_norm_eps=1e-5):
+        self.layer_norm_eps = layer_norm_eps
