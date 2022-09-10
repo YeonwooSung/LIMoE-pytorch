@@ -8,7 +8,7 @@ import torch.nn as nn
 class LIMoEConfig:
     def __init__(
         self, 
-        input_dim, 
+        vocab_size,
         num_experts, 
         num_tasks, 
         moe_input_size,
@@ -16,19 +16,20 @@ class LIMoEConfig:
         moe_output_size,
         top_k=4,
         noisy_gating=True,
+        max_position_embeddings=512,
         hidden_dim=1024, 
         num_layers=8, 
         dropout=0.1, 
         pre_lnorm=True,
         n_heads=8,
-        d_heads=64, #TODO need to check d_heads in the paper
         layer_norm_eps=1e-5,
         expert_activation=nn.ReLU(), 
         task_activation=nn.ReLU(), 
-        output_activation=nn.Sigmoid()
+        output_activation=nn.Sigmoid(),
     ):
         # Input
-        self.input_dim = input_dim
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_dim
 
         # MoE
         self.num_experts = num_experts
@@ -40,12 +41,13 @@ class LIMoEConfig:
         self.moe_output_size = moe_output_size
 
         # Transformer
+        self.max_position_embeddings = max_position_embeddings
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.dropout = dropout
         self.pre_lnorm = pre_lnorm
         self.n_heads = n_heads
-        self.d_heads = d_heads
+        self.d_heads = int(hidden_dim / n_heads)
 
         # LayerNorm
         self.layer_norm_eps = layer_norm_eps
@@ -54,6 +56,11 @@ class LIMoEConfig:
         self.expert_activation = expert_activation
         self.task_activation = task_activation
         self.output_activation = output_activation
+    
+
+    def set_input_params(self, vocab_size, hidden_size):
+        self.vocab_size = vocab_size
+        self.hidden_size = hidden_size
     
     def set_moe_params(
         self, 
@@ -80,14 +87,15 @@ class LIMoEConfig:
         dropout, 
         pre_lnorm=True,
         n_heads=8,
-        d_heads=64, #TODO need to check d_heads in the paper
+        max_position_embeddings=512,
     ):
+        self.max_position_embeddings = max_position_embeddings
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
         self.dropout = dropout
         self.pre_lnorm = pre_lnorm
         self.n_heads = n_heads
-        self.d_heads = d_heads
+        self.d_heads = int(hidden_dim / n_heads)
 
     def set_layer_norm_params(self, layer_norm_eps=1e-5):
         self.layer_norm_eps = layer_norm_eps
