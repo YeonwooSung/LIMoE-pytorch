@@ -45,19 +45,22 @@ class SelfAttention(nn.Module):
         self.d_heads = config.d_heads
         self.scale = 1 / (self.d_heads ** 0.5)
         qkv_output_dim = self.n_heads * self.d_heads
+        self.all_head_size = qkv_output_dim
 
         # Q, K, V
         self.fc_q = nn.Linear(self.hidden_dim, qkv_output_dim)
         self.fc_k = nn.Linear(self.hidden_dim, qkv_output_dim)
         self.fc_v = nn.Linear(self.hidden_dim, qkv_output_dim)
 
-        # Output
-        self.fc_o = nn.Linear(qkv_output_dim, self.hidden_dim)
-
         # Dropout
         self.dropout = nn.Dropout(self.dropout)
-        # LayerNorm
-        self.ln = nn.LayerNorm(self.hidden_dim)
+
+
+    def transpose_for_scores(self, x):
+        new_x_shape = x.size()[:-1] + (self.num_attention_heads, self.attention_head_size)
+        x = x.view(*new_x_shape)
+        return x.permute(0, 2, 1, 3)
+
 
     def forward(
         self,
@@ -71,12 +74,8 @@ class SelfAttention(nn.Module):
             query_states = hidden_states
         residual = hidden_states
 
-        # LayerNorm
-        if self.pre_lnorm:
-            query_states = self.ln(query_states)
-            kv_states = self.ln(hidden_states)
-        else:
-            kv_states = hidden_states
+        # generate kv_states for key and value
+        kv_states = hidden_states
 
         # Q, K, V
         q = self.fc_q(query_states)
@@ -84,29 +83,34 @@ class SelfAttention(nn.Module):
         v = self.fc_v(kv_states)
 
         # Split heads
-        q = q.view(q.size(0), q.size(1), self.n_heads, self.d_heads).transpose(1, 2)
-        k = k.view(k.size(0), k.size(1), self.n_heads, self.d_heads).transpose(1, 2)
-        v = v.view(v.size(0), v.size(1), self.n_heads, self.d_heads).transpose(1, 2)
+        q = self.transpose_for_scores(q)
+        k = self.transpose_for_scores(k)
+        v = self.transpose_for_scores(v)
 
         # Attention
-        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
-        attn = attn.masked_fill(attention_mask.unsqueeze(1).unsqueeze(2), -1e9)
+        attn = torch.matmul(q, k.transpose(-1, -2))
+        attn = attn * self.scale
+        if attention_mask is not None:
+            # Apply the attention mask is (precomputed for all layers in BertModel forward() function)
+            attn = attn + attention_mask
+
+        # calculate attention probabilities
         attn = nn.Softmax(dim=-1)(attn)
+
+        # apply dropout
         attn = self.dropout(attn)
 
         # Mask heads if we want to
         if head_mask is not None:
             attn = attn * head_mask
 
-        # Apply layer norm to the attention map for the Post-LayerNorm case
-        if not self.pre_lnorm:
-            attn = self.ln(attn)
-
         # Output
         attention_output = torch.matmul(attn, v)
-        attention_output = attention_output.transpose(1, 2).contiguous().view(attention_output.size(0), attention_output.size(1), -1)
-        attention_output = self.fc_o(attention_output)
-        attention_output = self.dropout(attention_output)
+        attention_output = attention_output.permute(0, 2, 1, 3).contiguous()
+        new_context_layer_shape = attention_output.size()[:-2] + (self.all_head_size,)
+        attention_output = attention_output.view(*new_context_layer_shape)
+
+        # residual connection
         attention_output = attention_output + residual
 
         # Output
@@ -448,6 +452,8 @@ class DenseSelfAttentionBlock(nn.Module):
         super().__init__()
         self.attention = SelfAttention(config)
         self.outptut = DenseSelfAttentionOutputBlock(config)
+        # layer norm
+        self.preLayerNorm = LIMoELayerNorm(config.hidden_size, config.layer_norm_eps)
 
     def forward(
         self,
@@ -457,6 +463,9 @@ class DenseSelfAttentionBlock(nn.Module):
         query_states=None,
         output_attentions=False,
     ):
+        # pre layer norm
+        hidden_states = self.preLayerNorm(hidden_states)
+
         # perform the self-attention
         attention_output = self.attention(
             hidden_states,
