@@ -380,6 +380,10 @@ class SparseSelfAttentionBlock(nn.Module):
         # MoE
         self.moe = MoE(config)
 
+        # layer norm
+        self.preLayerNorm = LIMoELayerNorm(config.hidden_size, config.layer_norm_eps)
+        self.postLayerNorm = LIMoELayerNorm(config.hidden_size, config.layer_norm_eps)
+
     def forward(
         self,
         hidden_states,
@@ -388,6 +392,9 @@ class SparseSelfAttentionBlock(nn.Module):
         query_states=None,
         output_attentions=False,
     ):
+        # pass through layer norm before perform self-attention
+        hidden_states = self.preLayerNorm(hidden_states)
+
         # perform the self-attention
         attention_output = self.attention(
             hidden_states,
@@ -402,6 +409,11 @@ class SparseSelfAttentionBlock(nn.Module):
             attention_output, attn_matrix = attention_output
         if query_states is None:
             query_states = hidden_states
+        
+        # residual connection
+        attention_output += hidden_states
+        # post layer norm
+        attention_output = self.postLayerNorm(attention_output)
 
         # MoE
         moe_output = self.moe(attention_output, query_states)
