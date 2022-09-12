@@ -22,10 +22,15 @@ class LIMoEConfig:
         dropout=0.1, 
         pre_lnorm=True,
         n_heads=8,
+        image_size=224,
         layer_norm_eps=1e-5,
         expert_activation=nn.ReLU(), 
         task_activation=nn.ReLU(), 
         output_activation=nn.Sigmoid(),
+        hidden_act="gelu",
+        output_attentions=False,
+        output_hidden_states=False,
+        use_return_dict=True,
     ):
         # Input
         self.vocab_size = vocab_size
@@ -39,6 +44,9 @@ class LIMoEConfig:
         self.moe_input_size = moe_input_size
         self.moe_hidden_size = moe_hidden_size
         self.moe_output_size = moe_output_size
+
+        # image
+        self.image_size = image_size
 
         # Transformer
         self.max_position_embeddings = max_position_embeddings
@@ -56,6 +64,12 @@ class LIMoEConfig:
         self.expert_activation = expert_activation
         self.task_activation = task_activation
         self.output_activation = output_activation
+        self.hidden_act = hidden_act
+
+        # Other
+        self.output_attentions = output_attentions
+        self.output_hidden_states = output_hidden_states
+        self.use_return_dict = use_return_dict
     
 
     def set_input_params(self, vocab_size, hidden_size):
