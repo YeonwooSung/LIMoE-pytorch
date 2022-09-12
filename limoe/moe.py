@@ -1,8 +1,10 @@
+from distutils.command.config import config
 import torch
 import torch.nn as nn
 from torch.distributions.normal import Normal
 import numpy as np
 
+from .activations import ACT2FN
 from .config import LIMoEConfig
 
 
@@ -10,16 +12,18 @@ from .config import LIMoEConfig
 # MoE
 
 class MLP(nn.Module):
-    def __init__(self, input_size, output_size, hidden_size):
+    def __init__(self, conifg:LIMoEConfig, input_size:int, output_size:int, hidden_size:int):
         super(MLP, self).__init__()
         self.fc1 = nn.Linear(input_size, hidden_size)
         self.fc2 = nn.Linear(hidden_size, output_size)
-        self.relu = nn.ReLU()
+        self.dropout = nn.Dropout(config.dropout)
+        self.activation = ACT2FN(config.hidden_act)
         self.log_soft = nn.LogSoftmax(1)
 
     def forward(self, x):
         out = self.fc1(x)
-        out = self.relu(out)
+        out = self.activation(out)
+        out = self.dropout(out)
         out = self.fc2(out)
         out = self.log_soft(out)
         return out
@@ -153,7 +157,7 @@ class MoE(nn.Module):
         self.k = config.moe_k
 
         # instantiate experts
-        self.experts = nn.ModuleList([MLP(self.input_size, self.output_size, self.hidden_size) for i in range(self.num_experts)])
+        self.experts = nn.ModuleList([MLP(config, self.input_size, self.output_size, self.hidden_size) for i in range(self.num_experts)])
         self.w_gate = nn.Parameter(torch.zeros(self.input_size, self.num_experts), requires_grad=True)
         self.w_noise = nn.Parameter(torch.zeros(self.input_size, self.num_experts), requires_grad=True)
 
@@ -277,7 +281,8 @@ class MoE(nn.Module):
         gates, load = self.noisy_top_k_gating(x, train)
         # calculate importance loss
         importance = gates.sum(0)
-        #
+        
+        # calculate loss
         loss = self.cv_squared(importance) + self.cv_squared(load)
         loss *= loss_coef
 
