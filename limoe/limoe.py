@@ -4,9 +4,10 @@ import torch
 from torch import Tensor, nn, device
 from typing import Optional, Tuple
 
+from .activations import ACT2FN
 from .config import LIMoEConfig
 from .moe import MoE
-from .helper import StableDropout, LimoeModelOutput
+from .helper import StableDropout, LimoeModelOutput, LimoeModelOutputWithPooling
 
 
 #-------------------#
@@ -62,6 +63,7 @@ class SelfAttention(nn.Module):
         self,
         hidden_states,
         attention_mask,
+        head_mask=None,
         query_states=None,
         output_attentions=False,
     ):
@@ -92,6 +94,10 @@ class SelfAttention(nn.Module):
         attn = nn.Softmax(dim=-1)(attn)
         attn = self.dropout(attn)
 
+        # Mask heads if we want to
+        if head_mask is not None:
+            attn = attn * head_mask
+
         # Apply layer norm to the attention map for the Post-LayerNorm case
         if not self.pre_lnorm:
             attn = self.ln(attn)
@@ -110,6 +116,8 @@ class SelfAttention(nn.Module):
 
 #-------------------#
 # Text Embedding
+
+#TODO add config for embeddings to LIMoEConfig
 
 class TextEmbeddings(nn.Module):
     """Construct the embeddings from word, position and token_type embeddings."""
@@ -376,6 +384,7 @@ class SparseSelfAttentionBlock(nn.Module):
         self,
         hidden_states,
         attention_mask,
+        head_mask=None,
         query_states=None,
         output_attentions=False,
     ):
@@ -383,6 +392,7 @@ class SparseSelfAttentionBlock(nn.Module):
         attention_output = self.attention(
             hidden_states,
             attention_mask,
+            head_mask=head_mask,
             query_states=query_states,
             output_attentions=output_attentions,
         )
@@ -397,7 +407,7 @@ class SparseSelfAttentionBlock(nn.Module):
         moe_output = self.moe(attention_output, query_states)
 
         # Output
-        outputs = (moe_output, attn_matrix) if output_attentions else moe_output
+        outputs = (moe_output, attn_matrix) if output_attentions else (moe_output,)
         return outputs
 
 #-------------------#
@@ -408,6 +418,9 @@ class DenseSelfAttentionOutputBlock(nn.Module):
         super().__init__()
         self.LayerNorm = LIMoELayerNorm(config.hidden_size, config.layer_norm_eps)
         self.dropout = StableDropout(config.hidden_dropout_prob)
+
+        # dense layer
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
 
     def forward(self, hidden_states, input_tensor):
         hidden_states = self.dense(hidden_states)
@@ -428,6 +441,7 @@ class DenseSelfAttentionBlock(nn.Module):
         self,
         hidden_states,
         attention_mask,
+        head_mask=None,
         query_states=None,
         output_attentions=False,
     ):
@@ -435,6 +449,7 @@ class DenseSelfAttentionBlock(nn.Module):
         attention_output = self.attention(
             hidden_states,
             attention_mask,
+            head_mask=head_mask,
             query_states=query_states,
             output_attentions=output_attentions,
         )
@@ -447,7 +462,7 @@ class DenseSelfAttentionBlock(nn.Module):
         attention_output = self.outptut(attention_output, query_states)
 
         # Output
-        outputs = (attention_output, attn_matrix) if output_attentions else attention_output
+        outputs = (attention_output, attn_matrix) if output_attentions else (attention_output,)
         return outputs
 
 #-------------------#
@@ -466,7 +481,35 @@ class LIMoEEncoderLayer(nn.Module):
         head_mask=None, 
         output_attentions=False
     ):
-        pass
+        # dense attention
+        dense_attention_outputs = self.dense_attention(
+            hidden_states,
+            attention_mask,
+            head_mask=head_mask,
+            output_attentions=output_attentions,
+        )
+        dense_attention_output = dense_attention_outputs[0]
+        dense_outputs = dense_attention_outputs[1:]  # add self attentions if we output attention weights
+
+        # first residual connection
+        hidden_states = dense_attention_output + hidden_states
+
+        # sparse attention
+        sparse_attention_outputs = self.sparse_attention(
+            hidden_states,
+            attention_mask,
+            head_mask=head_mask,
+            output_attentions=output_attentions,
+        )
+        sparse_attention_output = sparse_attention_outputs[0]
+        sparse_outputs = sparse_attention_outputs[1:]  # add self attentions if we output attention weights
+
+        # second residual connection
+        hidden_states = sparse_attention_output + hidden_states
+
+        # Output
+        outputs = (hidden_states,) + dense_outputs + sparse_outputs
+        return outputs
 
 #-------------------#
 # LIMoE Encoder
@@ -531,12 +574,31 @@ class LIMoEEncoder(nn.Module):
 
 
 #-------------------#
+# LIMoE Pooler
+
+class LIMoEPooler(nn.Module):
+    def __init__(self, config:LIMoEConfig) -> None:
+        super().__init__()
+        self.dense = nn.Linear(config.hidden_size, config.hidden_size)
+        if isinstance(config.hidden_act, str):
+            self.activation = ACT2FN[config.hidden_act]
+
+    def forward(self, hidden_states):
+        # We "pool" the model by simply taking the hidden state corresponding
+        # to the first token.
+        first_token_tensor = hidden_states[:, 0]
+        pooled_output = self.dense(first_token_tensor)
+        pooled_output = self.activation(pooled_output)
+        return pooled_output
+
+#-------------------#
 # LIMoE model
 
 class LIMoE(nn.Module):
     def __init__(self, config:LIMoEConfig) -> None:
         super().__init__()
         self.config = config
+        self.layer_norm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
 
         # Embeddings
         self.embeddings = LimoeEmbeddings(config)
@@ -544,7 +606,8 @@ class LIMoE(nn.Module):
         # Encoder
         self.encoder = LIMoEEncoder(config)
 
-        # TODO: add the output layer
+        # Pooler
+        self.pooler = LIMoEPooler(config)
 
 
     def get_input_embeddings(self):
@@ -592,7 +655,11 @@ class LIMoE(nn.Module):
     
 
     def get_extended_attention_mask(
-        self, attention_mask: Tensor, input_shape: Tuple[int], device: device = None, dtype: torch.float = None
+        self, 
+        attention_mask: Tensor, 
+        input_shape: Tuple[int], 
+        device: device = None, 
+        dtype: torch.float = None
     ) -> Tensor:
         """
         Makes broadcastable attention and causal masks so that future and masked tokens are ignored.
@@ -613,6 +680,7 @@ class LIMoE(nn.Module):
                 warnings.warn(
                     "The `device` argument is deprecated and will be removed in v5 of Transformers.", FutureWarning
                 )
+
         # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
         # ourselves in which case we just need to make it broadcastable to all heads.
         if attention_mask.dim() == 3:
@@ -631,6 +699,7 @@ class LIMoE(nn.Module):
             raise ValueError(
                 f"Wrong shape for input_ids (shape {input_shape}) or attention_mask (shape {attention_mask.shape})"
             )
+
 
         # Since attention_mask is 1.0 for positions we want to attend and 0.0 for
         # masked positions, this operation will create a tensor which is 0.0 for
@@ -693,9 +762,9 @@ class LIMoE(nn.Module):
         # Prepare head mask if needed
         # 1.0 in head_mask indicate we keep the head
         # attention_probs has shape bsz x n_heads x N x N
-        # input head_mask has shape [num_heads] or [num_hidden_layers x num_heads]
-        # and head_mask is converted to shape [num_hidden_layers x batch x num_heads x seq_length x seq_length]
-        head_mask = self.get_head_mask(head_mask, self.config.num_hidden_layers)
+        # input head_mask has shape [num_heads] or [num_layers x num_heads]
+        # and head_mask is converted to shape [num_layers x batch x num_heads x seq_length x seq_length]
+        head_mask = self.get_head_mask(head_mask, self.config.num_layers)
 
         # pass inputs to the embeddings module
         embedding_output, attention_mask = self.embeddings(
@@ -709,9 +778,35 @@ class LIMoE(nn.Module):
             image_token_type_idx=image_token_type_idx,
         )
 
-        #TODO pass embedding_output to the LIMoE encoder
+        
+        # We can provide a self-attention mask of dimensions [batch_size, from_seq_length, to_seq_length]
+        # ourselves in which case we just need to make it broadcastable to all heads.
+        extended_attention_mask: torch.Tensor = self.get_extended_attention_mask(attention_mask, input_shape)
 
-        #TODO pass encoder_output to the LIMoE output module
+        # pass embedding_output to the LIMoE encoder
+        encoder_outputs = self.encoder(
+            embedding_output,
+            attention_mask=extended_attention_mask,
+            head_mask=head_mask,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+        sequence_output = encoder_outputs[0]
+        sequence_output = self.layer_norm(sequence_output)
+
+        # pass the sequence_output to the pooler
+        pooled_output = self.pooler(sequence_output) if self.pooler is not None else None
+
+        if not return_dict:
+            return (sequence_output, pooled_output) + encoder_outputs[1:]
+
+        return LimoeModelOutputWithPooling(
+            last_hidden_state=sequence_output,
+            pooler_output=pooled_output,
+            hidden_states=encoder_outputs.hidden_states,
+            attentions=encoder_outputs.attentions,
+        )
 
 
     @staticmethod
