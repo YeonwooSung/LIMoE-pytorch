@@ -19,7 +19,7 @@ class LIMoEConfig:
         max_position_embeddings=512,
         type_vocab_size=2,
         modality_type_vocab_size=2,
-        hidden_dim=1024, 
+        hidden_dim=768, 
         num_layers=8, 
         dropout=0.1, 
         hidden_dropout_prob=0.1, 
