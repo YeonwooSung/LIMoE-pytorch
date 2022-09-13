@@ -7,7 +7,7 @@ from typing import Optional, Tuple
 from .activations import ACT2FN
 from .config import LIMoEConfig
 from .moe import MoE
-from .helper import StableDropout, LimoeModelOutput, LimoeModelOutputWithPooling
+from .helper import StableDropout, LimoeModelOutput, LimoeModelOutputWithPooling, LimoeSequenceClassifierOutput
 
 
 #-------------------#
@@ -134,6 +134,7 @@ class TextEmbeddings(nn.Module):
         # any TensorFlow checkpoint file
         self.LayerNorm = nn.LayerNorm(config.hidden_size, eps=config.layer_norm_eps)
         self.dropout = nn.Dropout(config.hidden_dropout_prob)
+
         # position_ids (1, len position emb) is contiguous in memory and exported when serialized
         self.position_embedding_type = getattr(config, "position_embedding_type", "absolute")
         self.register_buffer("position_ids", torch.arange(config.max_position_embeddings).expand((1, -1)))
@@ -855,3 +856,63 @@ class LIMoE(nn.Module):
 
         extended_attention_mask = causal_mask[:, None, :, :] * attention_mask[:, None, None, :]
         return extended_attention_mask
+
+
+#----------------------#
+# LIMoE Image And Text Retrieval model
+
+class LIMoEForImageAndTextRetrieval(nn.Module):
+    def __init__(self, config:LIMoEConfig) -> None:
+        super().__init__()
+
+        # LIMoE model
+        self.limoe = LIMoE(config)
+
+        # Classifier head
+        self.rank_output = nn.Linear(config.hidden_size, 1)
+        
+        #TODO init?
+    
+    def forward(
+        self,
+        input_ids: Optional[torch.LongTensor] = None,
+        attention_mask: Optional[torch.FloatTensor] = None,
+        token_type_ids: Optional[torch.LongTensor] = None,
+        pixel_values: Optional[torch.FloatTensor] = None,
+        pixel_mask: Optional[torch.LongTensor] = None,
+        head_mask: Optional[torch.FloatTensor] = None,
+        inputs_embeds: Optional[torch.FloatTensor] = None,
+        image_embeds: Optional[torch.FloatTensor] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+    ):
+        return_dict = return_dict if return_dict is not None else self.config.use_return_dict
+
+        outputs = self.limoe(
+            input_ids,
+            attention_mask=attention_mask,
+            token_type_ids=token_type_ids,
+            pixel_values=pixel_values,
+            pixel_mask=pixel_mask,
+            head_mask=head_mask,
+            inputs_embeds=inputs_embeds,
+            image_embeds=image_embeds,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+        )
+
+        pooler_output = outputs.pooler_output if return_dict else outputs[1]
+
+        logits = self.rank_output(pooler_output)
+
+        if not return_dict:
+            output = (logits,) + outputs[2:]
+            return output
+        
+        return LimoeSequenceClassifierOutput(
+            logits=logits,
+            hidden_states=outputs.hidden_states,
+            attentions=outputs.attentions,
+        )
