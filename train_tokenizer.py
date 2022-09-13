@@ -12,7 +12,7 @@ def select_bpe():
     return tokenizer
 
 def select_bytelevelbpe():
-    tokenizer = ByteLevelBPETokenizer(unk_token="[UNK]")
+    tokenizer = ByteLevelBPETokenizer()
     return tokenizer
 
 
