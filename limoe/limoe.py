@@ -121,8 +121,6 @@ class SelfAttention(nn.Module):
 #-------------------#
 # Text Embedding
 
-#TODO add config for embeddings to LIMoEConfig
-
 class TextEmbeddings(nn.Module):
     """Construct the embeddings from word, position and token_type embeddings."""
 
