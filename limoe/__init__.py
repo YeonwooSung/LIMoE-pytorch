@@ -1,1 +1,2 @@
-from .limoe import LIMoE
+from .limoe import LIMoE, LIMoEForImageAndTextRetrieval
+from .config import LIMoEConfig
