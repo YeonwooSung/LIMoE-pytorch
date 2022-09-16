@@ -3,8 +3,11 @@ from torch import nn
 from torch.utils.data import Dataset, DataLoader
 from tokenizers import Tokenizer
 from transformers import ViltFeatureExtractor
+import pandas as pd
+import os
+from PIL import Image
 
-from limoe import LIMoE, LIMoEForImageAndTextRetrieval, LIMoEConfig
+from limoe import LIMoE, LIMoEConfig, MLMHead, ITMHead, compute_mlm, compute_itm
 
 
 TOKENIZER_FILE = "tokenizer.json"
@@ -20,9 +23,13 @@ class TrainDataset(Dataset):
         return len(self.data)
 
     def __getitem__(self, idx):
-        image = self.data[idx]["image"]
+        image_path = self.data[idx]["image"]
         text = self.data[idx]["text"]
-        label = self.data[idx]["label"]
+        mlm_label = self.data[idx]["mlm_label"]
+        itm_label = self.data[idx]["itm_label"]
+
+        # Load image
+        image = Image.open(image_path)
 
         # Encode text
         encoded_text = self.tokenizer.encode(text)
@@ -34,16 +41,25 @@ class TrainDataset(Dataset):
         pixel_values = encoded_image.pixel_values
         pixel_mask = encoded_image.pixel_mask
 
+        mlm_label = torch.tensor(mlm_label)
+        itm_label = torch.tensor(itm_label)
+
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,
             "pixel_values": pixel_values,
             "pixel_mask": pixel_mask,
-            "labels": label,
+            "mlm_label": mlm_label,
+            "itm_label": itm_label,
         }
 
 
-def train_limoe(model, optimizer, loss_fn, data_loader, target_device="cuda"):
+def load_data(data_file):
+    data = pd.read_csv(data_file)
+    return data
+
+
+def train_limoe(model, mlm_head, itm_head, optimizer, data_loader, target_device="cuda"):
     device = torch.device(target_device)
     model.train()
     model.to(device)
@@ -51,12 +67,35 @@ def train_limoe(model, optimizer, loss_fn, data_loader, target_device="cuda"):
     # Train model
     for batch in data_loader:
         optimizer.zero_grad()
-        loss = loss_fn(model, batch) #TODO
+        input_ids = batch["input_ids"].to(device)
+        attention_mask = batch["attention_mask"].to(device)
+        pixel_values = batch["pixel_values"].to(device)
+        pixel_mask = batch["pixel_mask"].to(device)
+        mlm_label = batch["mlm_label"].to(device)
+        itm_label = batch["itm_label"].to(device)
+
+        
+        # Forward pass
+        logits = model(
+            input_ids=input_ids, 
+            attention_mask=attention_mask, 
+            pixel_values=pixel_values, 
+            pixel_mask=pixel_mask
+        )
+        mlm_logits = mlm_head(logits)
+        itm_logits = itm_head(logits)
+
+        # Compute loss
+        mlm_loss = compute_mlm(mlm_logits, mlm_label, model.config.vocab_size)
+        itm_loss = compute_itm(itm_logits, itm_label)
+
+        # Backward pass
+        loss = mlm_loss / 2 + itm_loss / 2
         loss.backward()
         optimizer.step()
 
 
-def main(max_length=128, batch_size=32, epochs=10, learning_rate=1e-4):
+def main(config, max_length=128, batch_size=32, epochs=10, learning_rate=1e-4):
     # Load tokenizer
     tokenizer = Tokenizer.from_file(TOKENIZER_FILE)
     tokenizer.enable_padding(pad_id=0, pad_token="[PAD]")
@@ -65,40 +104,26 @@ def main(max_length=128, batch_size=32, epochs=10, learning_rate=1e-4):
     # Load feature extractor
     feature_extractor = ViltFeatureExtractor.from_pretrained("google/vit-base-patch16-224-in21k")
 
-    # Create model
-    config = LIMoEConfig(
-        num_classes=1000,
-        num_experts=8,
-        hidden_size=768,
-        num_attention_heads=12,
-        intermediate_size=3072,
-        hidden_act="gelu",
-        hidden_dropout_prob=0.1,
-        attention_probs_dropout_prob=0.1,
-        max_position_embeddings=128,
-        initializer_range=0.02,
-        layer_norm_eps=1e-12,
-        gradient_checkpointing=False,
-        use_cache=False,
-    )
-    model = LIMoEForImageAndTextRetrieval(config)
+    # instantiate LIMoE model
+    model = LIMoE(config)
 
     # Create optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
-    # Create loss function
-    loss_fn = nn.CrossEntropyLoss()
-
     # Create dataset
-    data = None
+    data = load_data("data.csv")
     dataset = TrainDataset(tokenizer, feature_extractor, data)
 
     # Create data loader
     data_loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
+    # head models
+    mlm_head = MLMHead(config)
+    itm_head = ITMHead(config)
+
     # Train model
     for epoch in range(epochs):
-        train_limoe(model, tokenizer, feature_extractor, optimizer, loss_fn, data_loader)
+        train_limoe(model, mlm_head, itm_head, tokenizer, feature_extractor, optimizer, data_loader)
 
 
 if __name__ == "__main__":
@@ -122,8 +147,4 @@ if __name__ == "__main__":
         moe_output_size,
     )
 
-    # instantiate LIMoE model
-    model = LIMoE(config)
-
-    text_encodings = tokenizer.encode("Hello world!")
-    #TODO
+    main(config, max_length=128, batch_size=32, epochs=10, learning_rate=1e-4)
