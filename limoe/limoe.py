@@ -870,8 +870,6 @@ class LIMoEForImageAndTextRetrieval(nn.Module):
 
         # Classifier head
         self.rank_output = nn.Linear(config.hidden_size, 1)
-        
-        #TODO init?
     
     def forward(
         self,
